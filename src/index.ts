@@ -39,7 +39,8 @@ const notFound = () => new Response('Not found.', { status: 404, headers: SECURI
 async function cachedPage(req: Request, d: PageData, ctx: ExecutionContext, render: () => Promise<Response>): Promise<Response> {
   const sig = [d.page.updated_at, localDate(new Date().toISOString(), d.page.time_zone), ...d.components.map((c) => `${c.id}${c.status}${c.updated_at}`), ...d.incidents.map((i) => `${i.id}${i.updated_at}`)].join('|');
   let h = 2166136261; for (let i = 0; i < sig.length; i++) { h ^= sig.charCodeAt(i); h = Math.imul(h, 16777619); }
-  const key = new Request(`https://cache.pulsar/${d.page.slug}/${(h >>> 0).toString(36)}`);
+  // the host too: a page served at its own hostname links differently (pageAtHost)
+  const key = new Request(`https://cache.pulsar/${new URL(req.url).host}/${d.page.slug}/${(h >>> 0).toString(36)}`);
   const cache = (caches as unknown as { default: Cache }).default;
   const hit = await cache.match(key).catch(() => undefined);
   if (hit) return new Response(hit.body, hit);
@@ -50,6 +51,33 @@ async function cachedPage(req: Request, d: PageData, ctx: ExecutionContext, rend
   return res;
 }
 
+/** Which page has this hostname (pages.hostname), kept a minute per isolate; null: none. */
+const hostPages = new Map<string, { slug: string | null; at: number }>();
+async function pageForHost(db: D1Database, host: string): Promise<string | null> {
+  const hit = hostPages.get(host);
+  if (hit && Date.now() - hit.at < 60_000) return hit.slug;
+  const row = await db.prepare('SELECT slug FROM pages WHERE hostname = ?').bind(host).first<{ slug: string }>().catch(() => null);
+  hostPages.set(host, { slug: row?.slug ?? null, at: Date.now() });
+  return row?.slug ?? null;
+}
+
+/**
+ * A page at its own hostname: its paths are the /p/<slug> ones without that prefix ("/" is the
+ * page, "/api/v2/summary.json" its API…), and what goes back has the prefix taken out of its links
+ * (HTML, JSON, feeds). The admin and the write API stay on Pulsar's own host.
+ */
+async function pageAtHost(req: Request, env: Env, ctx: ExecutionContext, url: URL, slug: string): Promise<Response> {
+  if (url.pathname === '/admin' || url.pathname.startsWith('/admin/') || url.pathname.startsWith('/api/v1/')) return notFound();
+  if (url.pathname.startsWith('/assets/') || url.pathname === '/robots.txt' || url.pathname.startsWith(`/p/`)) return route(req, env, ctx, url);
+  const inner = new URL(url); inner.pathname = `/p/${slug}${url.pathname === '/' ? '' : url.pathname}`;
+  const res = await route(new Request(inner.toString(), req), env, ctx, inner);
+  const type = res.headers.get('content-type') ?? '';
+  if (!/html|json|xml|svg/.test(type) || !res.body) return res;
+  const prefix = `/p/${slug}`;
+  const body = (await res.text()).split(`"${prefix}"`).join('"/"').split(`${prefix}/`).join('/').split(prefix).join('');
+  return new Response(body, { status: res.status, headers: res.headers });
+}
+
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
@@ -58,6 +86,25 @@ export default {
         url.protocol = 'https:';
         return Response.redirect(url.toString(), 301);
       }
+      // A page's own hostname (never Pulsar's own, nor local development)
+      const own = env.PUBLIC_URL ? new URL(env.PUBLIC_URL).hostname : '';
+      if (url.hostname !== own && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
+        const slug = await pageForHost(env.DB, url.hostname);
+        if (slug) return await pageAtHost(req, env, ctx, url, slug);
+      }
+      return await route(req, env, ctx, url);
+    } catch (e) {
+      console.error('pulsar: request failed', (e as Error).message, (e as Error).stack);
+      return new Response('Something went wrong.', { status: 500 });
+    }
+  },
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    await runSchedule(env, ctx);
+  },
+} satisfies ExportedHandler<Env>;
+
+async function route(req: Request, env: Env, ctx: ExecutionContext, url: URL): Promise<Response> {
+    {
       if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
         const res = await handleAdmin(req, env, url, ctx);
         const h = new Headers(res.headers); h.set('cache-control', 'no-store'); for (const [k, v] of Object.entries(SECURITY_HEADERS)) if (!h.has(k)) h.set(k, v);
@@ -95,12 +142,5 @@ export default {
       const inc = /^\/incidents\/([a-z0-9]{12})$/.exec(rest);
       if (inc) return incidentPage(d, inc[1]!) ?? new Response('No such incident.', { status: 404, headers: SECURITY_HEADERS });
       return notFound();
-    } catch (e) {
-      console.error('pulsar: request failed', (e as Error).message, (e as Error).stack);
-      return new Response('Something went wrong.', { status: 500 });
     }
-  },
-  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    await runSchedule(env, ctx);
-  },
-} satisfies ExportedHandler<Env>;
+}

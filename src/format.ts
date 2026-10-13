@@ -5,7 +5,7 @@
 
 export interface PageRow {
   id: string; slug: string; name: string; time_zone: string; updated_at: string;
-  description?: string | null; accent?: string; logo_text?: string | null; website_url?: string | null; support_url?: string | null; hide_powered_by?: number;
+  description?: string | null; accent?: string; logo_text?: string | null; website_url?: string | null; support_url?: string | null; hide_powered_by?: number; hostname?: string | null;
 }
 export interface ComponentRow { id: string; page_id: string; name: string; description: string | null; status: string; position: number; created_at: string; updated_at: string; group_name?: string | null; show_uptime?: number }
 export interface IncidentRow {

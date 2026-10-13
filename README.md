@@ -38,6 +38,7 @@ One Worker, one D1 database, no servers. Your status page stays up even when eve
 | | |
 |---|---|
 | **Status pages** | As many as you like, each at `/p/<page>`, with its own name, description, accent colour, mark, website and support links, and time zone |
+| **Own hostnames** | A page can also live at an address of its own (`status.example.com`): its page, API, history, feeds and badge served from the root there; the admin stays on Pulsar's host |
 | **Services** | Grouped under headings, five states (operational → major outage, plus maintenance), 90-day uptime per service |
 | **Incidents** | Investigating → identified → monitoring → resolved, with impact, affected services, a timeline of updates and a postmortem |
 | **Maintenance** | Scheduled windows that start and complete on their own (a cron every 5 minutes) |
@@ -75,6 +76,8 @@ npm run add-user -- admin                      # your first admin, on the deploy
 ```
 
 `wrangler.jsonc` is git-ignored, so your hostname and database id stay out of the repository.
+
+To give a page its own hostname: add it as a custom domain on the worker (another entry under `routes` in `wrangler.jsonc`, with `"custom_domain": true`, then `npm run deploy`), and set it under the page's **Settings → Hostname**.
 
 ## The write API
 

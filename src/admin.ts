@@ -73,7 +73,7 @@ export async function handleAdmin(req: Request, env: Env, url: URL, ctx: Ctx): P
   const f: Form = post ? await formOf(req) : new Map();
   try {
     if (rest === '') return overview(db, d, app, url);
-    if (rest === '/settings') return post ? saveSettings(db, user, d, f) : settingsView(d, app);
+    if (rest === '/settings') return post ? saveSettings(db, user, d, f, url.hostname) : settingsView(d, app);
     if (rest === '/delete' && post) return deletePage(db, user, d, f);
     if (rest === '/services') return post ? addService(db, user, d, f) : servicesView(d, app);
     let c = /^\/services\/([a-z0-9]{12})$/.exec(rest);
@@ -311,6 +311,7 @@ function settingsView(d: PageData, app: App): Response {
         <label class="f">Website<input name="website_url" type="url" value="${p.website_url ?? ''}" placeholder="https://"></label>
         <label class="f">Support<input name="support_url" value="${p.support_url ?? ''}" placeholder="https:// or mailto:"></label></div>
       <label class="f">Description <span class="hint">Under the title on the page</span><input name="description" value="${p.description ?? ''}" maxlength="240"></label>
+      <label class="f">Hostname <span class="hint">Optional: the page at an address of its own, like status.example.com (point it at Pulsar first: a custom domain on its worker)</span><input name="hostname" value="${p.hostname ?? ''}" maxlength="120" placeholder="status.example.com" pattern="[a-z0-9.-]+\.[a-z]{2,}"></label>
       <label class="check"><input type="checkbox" name="hide_powered_by" value="1"${raw(p.hide_powered_by ? ' checked' : '')}> Hide “Powered by Pulsar”</label>
       <div class="row end"><button class="btn" type="submit">Save</button></div></form>
     <form class="card panel danger-zone grid" method="post" action="${base}/delete" data-confirm="Delete ${p.name} with all its incidents? This can’t be undone."><h2>Danger zone</h2>
@@ -319,7 +320,7 @@ function settingsView(d: PageData, app: App): Response {
   });
 }
 
-async function saveSettings(db: D1Database, user: User, d: PageData, f: Form): Promise<Response> {
+async function saveSettings(db: D1Database, user: User, d: PageData, f: Form, selfHost: string): Promise<Response> {
   const back = `/admin/p/${d.page.slug}/settings`;
   const name = one(f, 'name'); const tz = one(f, 'time_zone'); const accent = one(f, 'accent'); const web = one(f, 'website_url'); const sup = one(f, 'support_url');
   if (!name || name.length > 80) return flash(back, 'A name.', 'err');
@@ -327,8 +328,11 @@ async function saveSettings(db: D1Database, user: User, d: PageData, f: Form): P
   if (!ACCENT.test(accent)) return flash(back, 'A colour like #7c5cff.', 'err');
   if (web && !httpsUrl(web)) return flash(back, 'The website: an https address.', 'err');
   if (sup && !httpsUrl(sup) && !/^mailto:[^\s@]+@[^\s@]+$/.test(sup)) return flash(back, 'Support: an https address or mailto:.', 'err');
-  await db.prepare('UPDATE pages SET name = ?, time_zone = ?, accent = ?, logo_text = ?, description = ?, website_url = ?, support_url = ?, hide_powered_by = ?, updated_at = ? WHERE id = ?')
-    .bind(name, tz, accent, one(f, 'logo_text').slice(0, 4) || null, one(f, 'description').slice(0, 240) || null, web || null, sup || null, one(f, 'hide_powered_by') ? 1 : 0, nowIso(), d.page.id).run();
+  const host = one(f, 'hostname').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (host && (!/^(?=.{4,120}$)([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(host) || host === selfHost)) return flash(back, 'A hostname like status.example.com (not Pulsar\'s own).', 'err');
+  if (host && (await db.prepare('SELECT 1 FROM pages WHERE hostname = ? AND id <> ?').bind(host, d.page.id).first())) return flash(back, 'Another page has that hostname.', 'err');
+  await db.prepare('UPDATE pages SET name = ?, time_zone = ?, accent = ?, logo_text = ?, description = ?, website_url = ?, support_url = ?, hide_powered_by = ?, hostname = ?, updated_at = ? WHERE id = ?')
+    .bind(name, tz, accent, one(f, 'logo_text').slice(0, 4) || null, one(f, 'description').slice(0, 240) || null, web || null, sup || null, one(f, 'hide_powered_by') ? 1 : 0, host || null, nowIso(), d.page.id).run();
   await audit(db, user.id, 'settings saved', { page: d.page.slug });
   return flash(back, 'Saved. The page shows it now.');
 }
