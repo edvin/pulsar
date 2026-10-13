@@ -1,0 +1,15 @@
+{
+  // Copy to wrangler.jsonc (git-ignored) and fill in your hostname and D1 database id:
+  //   npx wrangler d1 create pulsar
+  "name": "pulsar",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "status.example.com", "custom_domain": true }],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "pulsar", "database_id": "<your D1 database id>", "migrations_dir": "migrations" }
+  ],
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "vars": { "PUBLIC_URL": "https://status.example.com" },
+  "observability": { "enabled": true }
+}
