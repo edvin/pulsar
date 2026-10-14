@@ -21,9 +21,12 @@ export async function handleApi(req: Request, env: { DB: D1Database }, url: URL,
   const db = env.DB;
   const token = /^Bearer\s+(pls_[A-Za-z0-9]{20,60})$/.exec(req.headers.get('authorization') ?? '')?.[1];
   if (!token) return fail(401, 'Send an API key: Authorization: Bearer pls_…');
-  const key = await db.prepare('SELECT id, page_id, name FROM api_keys WHERE key_hash = ?').bind(await sha256(token)).first<{ id: string; page_id: string | null; name: string }>();
+  const key = await db.prepare('SELECT id, page_id, name, last_used FROM api_keys WHERE key_hash = ?').bind(await sha256(token)).first<{ id: string; page_id: string | null; name: string; last_used: string | null }>();
   if (!key) return fail(401, 'Unknown API key.');
-  ctx.waitUntil(db.prepare('UPDATE api_keys SET last_used = ? WHERE id = ?').bind(nowIso(), key.id).run());
+  // "last used" to the minute: a write per call made a polling client write as much as it read
+  if (!key.last_used || Date.now() - Date.parse(key.last_used) > 60_000) {
+    ctx.waitUntil(db.prepare('UPDATE api_keys SET last_used = ? WHERE id = ?').bind(nowIso(), key.id).run());
+  }
 
   const m = /^\/api\/v1\/pages\/([a-z0-9-]{1,40})(\/.*)?$/.exec(url.pathname);
   if (!m) return fail(404, 'Not found.');
