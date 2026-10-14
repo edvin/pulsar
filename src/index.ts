@@ -107,12 +107,15 @@ async function route(req: Request, env: Env, ctx: ExecutionContext, url: URL): P
     {
       if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
         const res = await handleAdmin(req, env, url, ctx);
+        if (req.method !== 'GET' && req.method !== 'HEAD' && res.status < 400) await bumpEdgeVersion();
         const h = new Headers(res.headers); h.set('cache-control', 'no-store'); for (const [k, v] of Object.entries(SECURITY_HEADERS)) if (!h.has(k)) h.set(k, v);
         return new Response(res.body, { status: res.status, headers: h });
       }
       if (url.pathname.startsWith('/api/v1/')) {
         if (req.method === 'OPTIONS') return new Response(null, { status: 204 });
-        return await handleApi(req, env, url, ctx);
+        const res = await handleApi(req, env, url, ctx);
+        if (req.method !== 'GET' && req.method !== 'HEAD' && res.status < 400) await bumpEdgeVersion();
+        return res;
       }
       if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...JSON_HEADERS, 'access-control-allow-methods': 'GET, OPTIONS' } });
       if (req.method !== 'GET' && req.method !== 'HEAD') return new Response('Method not allowed.', { status: 405 });
@@ -126,9 +129,44 @@ async function route(req: Request, env: Env, ctx: ExecutionContext, url: URL): P
 
       const m = /^\/p\/([a-z0-9-]{1,40})(\/.*)?$/.exec(url.pathname);
       if (!m) return notFound();
-      const rest = (m[2] ?? '').replace(/\/+$/, '');
+      // A page's public reads, kept EDGE_TTL_S at the edge before anything touches D1: D1 is
+      // billed by rows read, and one read loads the page, its components and its last 100
+      // incidents with their updates (hundreds of rows). A client polling every few seconds
+      // otherwise costs millions a week. The cost: a change shows up to EDGE_TTL_S late.
+      return await edgeCached(url, ctx, () => publicPage(env, ctx, req, url, m[1]!, (m[2] ?? '').replace(/\/+$/, '')));
+    }
+}
+
+const EDGE_TTL_S = 10;
+const edgeCache = () => (caches as unknown as { default: Cache }).default;
+/** Bumped on every successful write (admin or API), so this edge location never serves a page
+ *  older than the write it just took; elsewhere a copy lives EDGE_TTL_S at most. */
+const VERSION_KEY = new Request('https://edge.pulsar/__version');
+async function edgeVersion(): Promise<string> {
+  const v = await edgeCache().match(VERSION_KEY).catch(() => undefined);
+  return v ? await v.text() : '0';
+}
+async function bumpEdgeVersion(): Promise<void> {
+  await edgeCache().put(VERSION_KEY, new Response(String(Date.now()), { headers: { 'cache-control': 'public, max-age=86400' } })).catch(() => {});
+}
+async function edgeCached(url: URL, ctx: ExecutionContext, make: () => Promise<Response>): Promise<Response> {
+  const key = new Request(`https://edge.pulsar/${url.host}${url.pathname.replace(/\/+$/, '')}?v=${await edgeVersion()}`);
+  const cache = edgeCache();
+  const hit = await cache.match(key).catch(() => undefined);
+  if (hit) return new Response(hit.body, hit);
+  const res = await make();
+  if (res.status === 200) {
+    const stored = new Response(res.clone().body, res);
+    stored.headers.set('cache-control', `public, max-age=${EDGE_TTL_S}`);
+    ctx.waitUntil(cache.put(key, stored).catch(() => {}));
+  }
+  return res;
+}
+
+async function publicPage(env: Env, ctx: ExecutionContext, req: Request, url: URL, slug: string, rest: string): Promise<Response> {
+    {
       const api = /^\/api\/v2\/([a-z-]+\.json)$/.exec(rest);
-      const d = await loadPage(env.DB, m[1]!);
+      const d = await loadPage(env.DB, slug);
       if (!d) return api ? Response.json({ error: 'not found' }, { status: 404, headers: JSON_HEADERS }) : new Response('No such page.', { status: 404, headers: SECURITY_HEADERS });
       if (api) {
         const build = API[api[1]!];
