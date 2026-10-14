@@ -13,27 +13,30 @@ export async function pageBySlug(db: D1Database, slug: string): Promise<PageRow 
   return db.prepare('SELECT * FROM pages WHERE slug = ?').bind(slug).first<PageRow>();
 }
 
-/** A page with its components and its last 100 incidents (and maintenance), their updates and components. */
-export async function loadPage(db: D1Database, slug: string): Promise<PageData | null> {
-  const page = await pageBySlug(db, slug);
-  if (!page) return null;
-  const [components, incidents] = await db.batch([
-    db.prepare('SELECT * FROM components WHERE page_id = ? ORDER BY position, name').bind(page.id),
-    db.prepare('SELECT * FROM incidents WHERE page_id = ? ORDER BY created_at DESC LIMIT 100').bind(page.id),
+/** A page with its components and its last 100 incidents (and maintenance), their updates and
+ *  components: ONE round trip (each statement finds the page by its slug), and with `openOnly` just
+ *  what is still open (summary/status and the API's read show nothing else). D1 bills rows read. */
+export async function loadPage(db: D1Database, slug: string, opts: { openOnly?: boolean } = {}): Promise<PageData | null> {
+  if (!/^[a-z0-9-]{1,40}$/.test(slug)) return null;
+  const pageId = '(SELECT id FROM pages WHERE slug = ?1)';
+  const open = opts.openOnly ? ` AND ((kind = 'incident' AND status NOT IN ('resolved', 'postmortem')) OR (kind = 'maintenance' AND status <> 'completed'))` : '';
+  const ids = `SELECT id FROM incidents WHERE page_id = ${pageId}${open} ORDER BY created_at DESC LIMIT 100`;
+  const [pages, components, incidents, updates, links] = await db.batch([
+    db.prepare('SELECT * FROM pages WHERE slug = ?1').bind(slug),
+    db.prepare(`SELECT * FROM components WHERE page_id = ${pageId} ORDER BY position, name`).bind(slug),
+    db.prepare(`SELECT * FROM incidents WHERE page_id = ${pageId}${open} ORDER BY created_at DESC LIMIT 100`).bind(slug),
+    db.prepare(`SELECT * FROM incident_updates WHERE incident_id IN (${ids}) ORDER BY created_at`).bind(slug),
+    db.prepare(`SELECT incident_id, component_id FROM incident_components WHERE incident_id IN (${ids})`).bind(slug),
   ]);
-  const inc = (incidents!.results ?? []) as unknown as IncidentRow[];
-  const ids = inc.map((i) => i.id);
-  let updates: UpdateRow[] = []; let links: Array<{ incident_id: string; component_id: string }> = [];
-  if (ids.length) {
-    const marks = ids.map(() => '?').join(',');
-    const [u, l] = await db.batch([
-      db.prepare(`SELECT * FROM incident_updates WHERE incident_id IN (${marks}) ORDER BY created_at`).bind(...ids),
-      db.prepare(`SELECT incident_id, component_id FROM incident_components WHERE incident_id IN (${marks})`).bind(...ids),
-    ]);
-    updates = (u!.results ?? []) as unknown as UpdateRow[];
-    links = (l!.results ?? []) as unknown as Array<{ incident_id: string; component_id: string }>;
-  }
-  return { page, components: (components!.results ?? []) as unknown as ComponentRow[], incidents: inc, updates, links };
+  const page = (pages!.results?.[0] ?? null) as unknown as PageRow | null;
+  if (!page) return null;
+  return {
+    page,
+    components: (components!.results ?? []) as unknown as ComponentRow[],
+    incidents: (incidents!.results ?? []) as unknown as IncidentRow[],
+    updates: (updates!.results ?? []) as unknown as UpdateRow[],
+    links: (links!.results ?? []) as unknown as Array<{ incident_id: string; component_id: string }>,
+  };
 }
 
 // Building an Intl formatter is the expensive part: one per time zone, kept.

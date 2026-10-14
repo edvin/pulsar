@@ -30,7 +30,8 @@ export async function handleApi(req: Request, env: { DB: D1Database }, url: URL,
 
   const m = /^\/api\/v1\/pages\/([a-z0-9-]{1,40})(\/.*)?$/.exec(url.pathname);
   if (!m) return fail(404, 'Not found.');
-  const d = await loadPage(db, m[1]!);
+  // a read shows only what is open (writes need the page as it is: they load it themselves)
+  const d = await loadPage(db, m[1]!, { openOnly: (m[2] ?? '') === '' && req.method === 'GET' });
   if (!d || (key.page_id && key.page_id !== d.page.id)) return fail(404, 'No such page (for this key).');
   const rest = m[2] ?? '';
   const actor = `api:${key.name}`;

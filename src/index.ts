@@ -166,7 +166,8 @@ async function edgeCached(url: URL, ctx: ExecutionContext, make: () => Promise<R
 async function publicPage(env: Env, ctx: ExecutionContext, req: Request, url: URL, slug: string, rest: string): Promise<Response> {
     {
       const api = /^\/api\/v2\/([a-z-]+\.json)$/.exec(rest);
-      const d = await loadPage(env.DB, slug);
+      // summary and status show only what is open: load only that
+      const d = await loadPage(env.DB, slug, { openOnly: api?.[1] === 'summary.json' || api?.[1] === 'status.json' });
       if (!d) return api ? Response.json({ error: 'not found' }, { status: 404, headers: JSON_HEADERS }) : new Response('No such page.', { status: 404, headers: SECURITY_HEADERS });
       if (api) {
         const build = API[api[1]!];
